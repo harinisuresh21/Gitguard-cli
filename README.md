@@ -1,7 +1,7 @@
 # 🛡️ GitGuard
 Don't Just Clone. Verify Intent.
 
-GitGuard is an AI-powered "Logic Firewall" for developers. It audits the behavioral intent of unknown open-source software by executing it in an air-gapped local sandbox and using Google Gemini 3 to verify that the code's actual behavior matches its stated purpose.
+GitGuard is an AI-powered "Logic Firewall" for developers. It audits the behavioral intent of unknown open-source software by executing it in an air-gapped local sandbox and using LLM to verify that the code's actual behavior matches its stated purpose.
 
 # 🚩 The Problem: The "Blind Trust" Vulnerability
 Modern developers routinely run git clone followed by npm install or python main.py to test new tools. This reflexive muscle memory grants untrusted code full access to the host machine, including SSH keys, .env files, and local networks.
@@ -30,7 +30,7 @@ Intent Verification: We use Gemini 3's Enhanced Reasoning to compare the reposit
 
     .🕵️ Playwright Spy: Acts as a digital wiretap. It intercepts hidden HTTP requests and catches "lazy-loading" malware that waits for user interaction before phoning home.
 
-    .🧠 Gemini 3 Logic Audit: Understands context. It knows a "Weather App" should make external API calls, but a "Local Image Resizer" should not.
+    .🧠 LLM Logic Audit: Understands context. It knows a "Weather App" should make external API calls, but a "Local Image Resizer" should not.
 
     .🔦 AI De-Obfuscation: Automatically detects Base64 or minified strings, feeds them to Gemini 3, and translates the hidden payloads into readable logic.
 
@@ -47,7 +47,7 @@ The Host (Safe Zone): The Typer CLI parses your command and orchestrates the sca
 
 The Sandbox (Danger Zone): The Docker Manager spins up an isolated container, clones the target repo, and unleashes the Playwright Spy to monitor execution.
 
-The Brain (Intelligence): The host streams the captured logs to the Gemini 3 API, which analyzes the evidence and returns a color-coded security verdict.
+The Brain (Intelligence): The host streams the captured logs to the LLM, which analyzes the evidence and returns a color-coded security verdict.
 
 # 🛠️ Tech Stack
 AI Reasoning Engine: Google Gemini 3 (Pro & Flash) + Gemini Vision
@@ -102,3 +102,4 @@ Payload:     AWS_ACCESS_KEY_ID=AKIA... (Size: 24kb)
     * IDE Integration: A VS Code extension that automatically runs GitGuard in the background before you open a newly cloned folder.
     * Continuous Integration: A GitHub Action to audit pull requests for malicious intent, not just syntax errors.
     * Heuristic Engine: Pre-caching common malicious behavioral patterns to reduce AI token usage and speed up scan times.
+
