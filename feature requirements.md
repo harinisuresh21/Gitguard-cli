@@ -15,13 +15,13 @@ Description: The controller that manages the user lifecycle, input validation, a
 
 #### Functional Requirements:
 
-Must expose a Typer-based CLI with commands: gitguard check <url>, gitguard doctor (system check), and gitguard history.
+- Must expose a Typer-based CLI with commands: gitguard check <url>, gitguard doctor (system check), and gitguard history.
 
-Must parse and validate GitHub URLs, handling standard HTTP formats, SSH formats, and short-links.
+- Must parse and validate GitHub URLs, handling standard HTTP formats, SSH formats, and short-links.
 
-Must enforce a global timeout (e.g., 120 seconds maximum execution time per scan).
+- Must enforce a global timeout (e.g., 120 seconds maximum execution time per scan).
 
-Must capture and handle KeyboardInterrupt (Ctrl+C) to instantly kill the Docker container before exiting the CLI.
+- Must capture and handle KeyboardInterrupt (Ctrl+C) to instantly kill the Docker container before exiting the CLI.
 
 #### Technical Requirements:
 
@@ -34,9 +34,9 @@ Description: The secure execution environment. This is the most security-critica
 
 #### Functional Requirements:
 
-Must dynamically pull mcr.microsoft.com/playwright/python:v1.40.0-jammy if not present.
+- Must dynamically pull mcr.microsoft.com/playwright/python:v1.40.0-jammy if not present.
 
-The container must run as a non-root user (USER pwuser) to prevent basic privilege escalation.
+- The container must run as a non-root user (USER pwuser) to prevent basic privilege escalation.
 
 Volume Mounts: Absolutely NO host directories may be mounted. Code must be injected via git clone from inside the container or via a buffered docker cp equivalent.
 
@@ -53,15 +53,15 @@ Description: The internal agent that records what the malware actually does at r
 
 #### Functional Requirements:
 
-Must start a local HTTP server targeting the cloned repository's root.
+- Must start a local HTTP server targeting the cloned repository's root.
 
-Must launch a Headless Chromium browser, navigating to the local server.
+- Must launch a Headless Chromium browser, navigating to the local server.
 
-Must override browser navigator properties (e.g., webdriver: false) to prevent malware from detecting it is in an automated sandbox.
+- Must override browser navigator properties (e.g., webdriver: false) to prevent malware from detecting it is in an automated sandbox.
 
-Must log every network request: URL, Method, Headers, and Payload Size.
+- Must log every network request: URL, Method, Headers, and Payload Size.
 
-Must simulate human interaction: scrolling the page randomly and moving the mouse to trigger event-listeners tied to malware.
+- Must simulate human interaction: scrolling the page randomly and moving the mouse to trigger event-listeners tied to malware.
 
 #### Technical Requirements:
 
@@ -74,25 +74,25 @@ Description: Attackers rely on typosquatting (e.g., coloramaa instead of coloram
 
 #### Functional Requirements:
 
-Manifest Parsing: Must locate and parse all Python dependency manifests: requirements.txt, setup.py, pyproject.toml, and Pipfile.
+- Manifest Parsing: Must locate and parse all Python dependency manifests: requirements.txt, setup.py, pyproject.toml, and Pipfile.
 
-Typosquatting Detection (The "Fat Finger" Attack): * Extract every package name.
+- Typosquatting Detection (The "Fat Finger" Attack): * Extract every package name.
 
-Compare each name against a cached list of the Top 5000 downloaded PyPI packages.
+- Compare each name against a cached list of the Top 5000 downloaded PyPI packages.
 
-If a package name has a high similarity score (e.g., missing one letter, transposed letters) to a top package, flag it as CRITICAL.
+- If a package name has a high similarity score (e.g., missing one letter, transposed letters) to a top package, flag it as CRITICAL.
 
 #### Age & Reputation Verification:
 
-Must query the PyPI public API for every dependency.
+- Must query the PyPI public API for every dependency.
 
-Flag packages that were published less than 7 days ago.
+- Flag packages that were published less than 7 days ago.
 
-Flag packages with a disproportionately low version number relative to their name.
+- Flag packages with a disproportionately low version number relative to their name.
 
-Malicious setup.py Detection: * setup.py is executed upon installation. Attackers often put reverse shells directly inside setup.py.
+- Malicious setup.py Detection: * setup.py is executed upon installation. Attackers often put reverse shells directly inside setup.py.
 
-Must parse setup.py without running it to look for os.system, subprocess, or urllib.request calls outside of standard setup logic.
+- Must parse setup.py without running it to look for os.system, subprocess, or urllib.request calls outside of standard setup logic.
 
 #### Technical Requirements:
 
@@ -107,13 +107,13 @@ Description: The AI component that acts as the reasoning engine to eliminate fal
 
 #### Functional Requirements:
 
-Must read README.md to establish the "Developer's Promise" (e.g., "This is a local calculator").
+- Must read README.md to establish the "Developer's Promise" (e.g., "This is a local calculator").
 
-Must parse the combined outputs of the Playwright Spy and the Dependency Guard.
+- Must parse the combined outputs of the Playwright Spy and the Dependency Guard.
 
-Must format this evidence into a strict, predefined prompt template.
+- Must format this evidence into a strict, predefined prompt template.
 
-Must enforce structured JSON output from the AI.
+- Must enforce structured JSON output from the AI.
 
 #### Technical Requirements:
 
@@ -126,11 +126,11 @@ Description: Static scanners fail when code is obfuscated. This feature identifi
 
 #### Functional Requirements:
 
-Scan source code for high-entropy strings (long blocks of random-looking characters) and deeply nested eval() or exec() calls.
+- Scan source code for high-entropy strings (long blocks of random-looking characters) and deeply nested eval() or exec() calls.
 
-Must extract these specific blocks and send them to the AI for decoding.
+- Must extract these specific blocks and send them to the AI for decoding.
 
-Example: If the tool finds exec(__import__('base64').b64decode('...')), it must ask Gemini to translate the decoded payload back into plain Python.
+- Example: If the tool finds exec(__import__('base64').b64decode('...')), it must ask Gemini to translate the decoded payload back into plain Python.
 
 #### Technical Requirements:
 
