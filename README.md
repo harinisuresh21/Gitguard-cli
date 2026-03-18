@@ -1,4 +1,4 @@
-##### 🛡️ GitGuard
+# 🛡️ GitGuard
 Don't Just Clone. Verify Intent.
 
 GitGuard is an AI-powered "Logic Firewall" for developers. It audits the behavioral intent of unknown open-source software by executing it in an air-gapped local sandbox and using LLM to verify that the code's actual behavior matches its stated purpose.
