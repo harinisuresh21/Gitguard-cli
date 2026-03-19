@@ -145,4 +145,7 @@ Running gitguard check on a repo with requests misspelled as requsts in requirem
 
 Running gitguard check on a repo that pings http://localhost:8080/steal via a hidden JavaScript fetch() must be caught by Playwright and flagged 🔴 MALICIOUS (Network Exfiltration).
 
-If the user presses Ctrl+C during a scan, docker ps must show NO lingering containers.
+If the user presses Ctrl+C during a scan, docker ps must show NO lingering containers.   
+
+
+bye hi hakgdjvcjgsvchjvcHJVHJBVDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDd
