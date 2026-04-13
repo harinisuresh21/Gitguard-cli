@@ -17,7 +17,10 @@ The Real Threat: An app might claim to be a "Simple Offline Calculator" (Intent)
 There is currently no tool that answers: "Does the behavior of this code match its description, and is it safe to run?"
 
 # 💡 The Solution
-GitGuard bridges the gap between static code scanning and runtime security through a novel Behavioral Intent Audit.
+GitGuard bridges the gap between static code scanning and runtime security through a novel Behavioral Intent Audit. 
+
+
+hiiii vetgtge
 
 Sandboxed Detonation: We don't just read code; we run it in an ephemeral, isolated Docker Sandbox on your local machine.
 
