@@ -1,18 +1,5 @@
-from fastapi import FastAPI
-from app.api.routers import health
-from app.core.config import settings
- 
-app = FastAPI(
-title=settings.PROJECT_NAME,
-version="0.1.0",
-docs_url="/docs",
-redoc_url="/redoc",
-)
- 
-app.include_router(health.router, prefix="/health", tags=["health"])
-@app.get("/")
+from gitguard.cli import main
 
-def root():
-    return {"message": "OK", "environment": settings. ENVIRONMENT}
- 
- 
+
+if __name__ == "__main__":
+    main()

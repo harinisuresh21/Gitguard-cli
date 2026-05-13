@@ -1,9 +1,22 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "gitguard"
 version = "0.1.0"
-description = "Add your description here"
+description = "CLI for repository risk assessment"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10"
 dependencies = [
-    "fastapi>=0.135.1",
+    "docker>=7.1.0",
+    "psutil>=7.0.0",
+    "rich>=14.0.0",
+    "typer>=0.16.0",
 ]
+
+[project.scripts]
+gitguard = "gitguard.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gitguard*"]

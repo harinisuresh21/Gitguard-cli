@@ -1,0 +1,1 @@
+"""Core GitGuard functionality."""
