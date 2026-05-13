@@ -44,3 +44,34 @@ class SandboxResult:
     logs: str
     runtime_seconds: float
     warnings: list[str]
+    coverage: str
+    coverage_reason: str | None
+    telemetry_events: list[dict[str, object]]
+    progress_messages: list[str]
+    entrypoint: str | None
+
+
+@dataclass(slots=True)
+class DependencyFinding:
+    severity: str
+    category: str
+    package_name: str | None
+    manifest_path: str
+    message: str
+
+
+@dataclass(slots=True)
+class DependencyAnalysisResult:
+    manifests: list[str]
+    packages: list[str]
+    findings: list[DependencyFinding]
+    warnings: list[str]
+    blocked: bool
+
+
+@dataclass(slots=True)
+class ScanAssessment:
+    verdict: str
+    summary: str
+    evidence: list[str]
+    coverage: str

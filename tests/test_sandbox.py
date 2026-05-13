@@ -6,11 +6,16 @@ from unittest.mock import MagicMock, patch
 from gitguard.core.models import ScanRecord
 from gitguard.core.sandbox import (
     SANDBOX_CPU_LIMIT,
+    SANDBOX_DYNAMIC_TIMEOUT_SECONDS,
     SANDBOX_IMAGE,
     SANDBOX_MEMORY_LIMIT,
+    SANDBOX_CLONE_TIMEOUT_SECONDS,
+    SANDBOX_TOTAL_TIMEOUT_SECONDS,
+    SANDBOX_TMP_DIR,
     SANDBOX_USER,
-    SANDBOX_WORKDIR,
     SandboxTimeoutError,
+    _build_clone_command,
+    _infer_timeout_phase,
     run_sandbox_clone,
 )
 from gitguard.core.session import ScanSession
@@ -55,11 +60,13 @@ class SandboxTests(unittest.TestCase):
                 result = run_sandbox_clone(record.target_url, session)
 
         self.assertEqual(result.image, SANDBOX_IMAGE)
+        self.assertEqual(result.progress_messages, [])
+        self.assertIsNone(result.coverage_reason)
         client.images.pull.assert_called_once_with(SANDBOX_IMAGE)
         client.containers.run.assert_called_once()
         _, kwargs = client.containers.run.call_args
         self.assertEqual(kwargs["user"], SANDBOX_USER)
-        self.assertEqual(kwargs["working_dir"], SANDBOX_WORKDIR)
+        self.assertEqual(kwargs["working_dir"], SANDBOX_TMP_DIR)
         self.assertEqual(kwargs["network_mode"], "bridge")
         self.assertEqual(kwargs["read_only"], True)
         self.assertEqual(kwargs["cap_drop"], ["ALL"])
@@ -68,20 +75,46 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(kwargs["volumes"], {})
 
     @patch("gitguard.core.sandbox.time.sleep", return_value=None)
-    @patch("gitguard.core.sandbox.time.monotonic", side_effect=[0, 0, 61, 61])
+    @patch("gitguard.core.sandbox.time.monotonic", side_effect=[0, 0, 361, 361])
     def test_run_sandbox_clone_times_out_and_removes_container(
         self, _: MagicMock, __: MagicMock
     ) -> None:
         container = MagicMock()
         container.status = "running"
         container.id = "container-2"
+        container.logs.return_value = b'{"event": "coverage", "mode": "browser_dynamic"}\n'
 
-        with self.assertRaises(SandboxTimeoutError):
+        with self.assertRaisesRegex(SandboxTimeoutError, "dynamic analysis exceeded 360 seconds"):
             from gitguard.core.sandbox import _wait_for_container
 
-            _wait_for_container(container, timeout_seconds=60)
+            _wait_for_container(container, timeout_seconds=SANDBOX_TOTAL_TIMEOUT_SECONDS)
 
         container.remove.assert_called_once_with(force=True)
+
+    def test_timeout_error_preserves_logs(self) -> None:
+        container = MagicMock()
+        container.status = "running"
+        container.id = "container-3"
+        container.logs.return_value = b"GITGUARD_PROGRESS: Starting shallow clone\n"
+
+        with patch("gitguard.core.sandbox.time.sleep", return_value=None):
+            with patch("gitguard.core.sandbox.time.monotonic", side_effect=[0, 0, 361, 361]):
+                with self.assertRaises(SandboxTimeoutError) as context:
+                    from gitguard.core.sandbox import _wait_for_container
+
+                    _wait_for_container(container, timeout_seconds=SANDBOX_TOTAL_TIMEOUT_SECONDS)
+
+        self.assertIn("Starting shallow clone", context.exception.logs)
+
+    def test_infer_timeout_phase_defaults_to_clone_setup(self) -> None:
+        self.assertEqual(_infer_timeout_phase("plain logs"), "clone/setup stage")
+
+    def test_clone_command_embeds_phase_timeouts(self) -> None:
+        command = _build_clone_command()
+        self.assertEqual(command[:2], ["/bin/bash", "-lc"])
+        script = command[2]
+        self.assertIn(f"timeout {SANDBOX_CLONE_TIMEOUT_SECONDS}s git clone --depth 1", script)
+        self.assertIn(f"timeout {SANDBOX_DYNAMIC_TIMEOUT_SECONDS}s python - <<'PY'", script)
 
 
 if __name__ == "__main__":

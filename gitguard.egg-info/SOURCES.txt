@@ -15,9 +15,14 @@ gitguard/commands/verify_env.py
 gitguard/core/__init__.py
 gitguard/core/models.py
 gitguard/core/preflight.py
+gitguard/core/sandbox.py
+gitguard/core/session.py
 gitguard/core/state.py
 gitguard/core/validation.py
 gitguard/ui/__init__.py
 gitguard/ui/console.py
+tests/test_cli.py
+tests/test_sandbox.py
+tests/test_session.py
 tests/test_state.py
 tests/test_validation.py

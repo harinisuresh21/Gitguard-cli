@@ -12,7 +12,7 @@ import psutil
 from gitguard.core.models import ScanRecord
 from gitguard.core.state import get_active_scan_file
 
-GLOBAL_SCAN_TIMEOUT_SECONDS = 120
+GLOBAL_SCAN_TIMEOUT_SECONDS = 420
 
 
 class ConcurrentScanError(RuntimeError):
