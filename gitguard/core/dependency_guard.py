@@ -92,11 +92,11 @@ class PackageMetadata:
 
 
 def run_dependency_guard(target_url: str) -> DependencyAnalysisResult:
-    checkout_root = _clone_repository_to_tempdir(target_url)
+    checkout_root = clone_repository_to_tempdir(target_url)
     try:
         return analyze_dependency_manifests(checkout_root)
     finally:
-        shutil.rmtree(checkout_root, ignore_errors=True)
+        cleanup_checkout(checkout_root)
 
 
 def analyze_dependency_manifests(checkout_root: Path) -> DependencyAnalysisResult:
@@ -230,7 +230,7 @@ def fetch_pypi_package_metadata(package_name: str) -> PackageMetadata:
     return PackageMetadata(latest_version=latest_version, latest_release_time=latest_release_time)
 
 
-def _clone_repository_to_tempdir(target_url: str) -> Path:
+def clone_repository_to_tempdir(target_url: str) -> Path:
     state_dir = get_state_dir()
     checkout_root = Path(tempfile.mkdtemp(prefix="dep-guard-", dir=state_dir))
     command = ["git", "clone", "--depth", "1", target_url, str(checkout_root)]
@@ -245,9 +245,13 @@ def _clone_repository_to_tempdir(target_url: str) -> Path:
 
     if result.returncode != 0:
         stderr = result.stderr.strip() or result.stdout.strip() or "unknown git clone failure"
-        shutil.rmtree(checkout_root, ignore_errors=True)
+        cleanup_checkout(checkout_root)
         raise DependencyGuardError(f"Repository clone failed during dependency analysis: {stderr}")
     return checkout_root
+
+
+def cleanup_checkout(checkout_root: Path) -> None:
+    shutil.rmtree(checkout_root, ignore_errors=True)
 
 
 def _discover_manifests(checkout_root: Path) -> list[Path]:

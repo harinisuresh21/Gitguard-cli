@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from datetime import datetime, timezone
+from pathlib import Path
 
 import typer
 from rich.live import Live
@@ -9,8 +10,23 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from gitguard.core.dependency_guard import DependencyGuardError, run_dependency_guard
-from gitguard.core.models import DependencyAnalysisResult, DependencyFinding, ScanAssessment, ScanRecord
+from gitguard.core.ai_audit import AIAuditError, load_readme_context, run_ai_audit
+from gitguard.core.dependency_guard import (
+    DependencyGuardError,
+    analyze_dependency_manifests,
+    cleanup_checkout,
+    clone_repository_to_tempdir,
+)
+from gitguard.core.models import (
+    AIAuditResult,
+    DependencyAnalysisResult,
+    DependencyFinding,
+    ObfuscationAnalysisResult,
+    ObfuscationFinding,
+    ScanAssessment,
+    ScanRecord,
+)
+from gitguard.core.obfuscation_review import analyze_obfuscation
 from gitguard.core.preflight import PreflightError, run_preflight_checks
 from gitguard.core.runtime_analysis import assess_runtime_behavior
 from gitguard.core.sandbox import SandboxError, SandboxTimeoutError, run_sandbox_clone
@@ -29,9 +45,13 @@ def check_command(url: str) -> None:
     record: ScanRecord | None = None
     assessment: ScanAssessment | None = None
     dependency_result: DependencyAnalysisResult | None = None
+    obfuscation_result = ObfuscationAnalysisResult(findings=[], warnings=[])
+    ai_audit_result: AIAuditResult | None = None
+    ai_audit_warning: str | None = None
     preflight = None
     sandbox_result = None
     scans_file = None
+    static_checkout_root: Path | None = None
     try:
         console.clear()
         print_section("GitGuard Check")
@@ -50,14 +70,39 @@ def check_command(url: str) -> None:
             with console.status("Verifying host prerequisites...", spinner="dots"):
                 preflight = run_preflight_checks(require_ai_key=False)
             session.ensure_not_timed_out()
+            update_scan_record_status(record.scan_id, "static_checkout")
+            with console.status("Cloning repository for static analysis...", spinner="dots"):
+                static_checkout_root = clone_repository_to_tempdir(normalized_url)
+            session.ensure_not_timed_out()
             update_scan_record_status(record.scan_id, "dependency_guard")
             with console.status("Running dependency guard...", spinner="dots"):
-                dependency_result = run_dependency_guard(normalized_url)
+                dependency_result = analyze_dependency_manifests(static_checkout_root)
+            session.ensure_not_timed_out()
+            update_scan_record_status(record.scan_id, "obfuscation_review")
+            with console.status("Running obfuscation review...", spinner="dots"):
+                obfuscation_result = analyze_obfuscation(static_checkout_root)
             session.ensure_not_timed_out()
             if dependency_result.blocked:
-                assessment = _build_dependency_only_assessment(dependency_result)
+                assessment = _build_dependency_only_assessment(dependency_result, obfuscation_result)
+                ai_audit_result, ai_audit_warning = _attempt_ai_audit(
+                    static_checkout_root,
+                    dependency_result,
+                    obfuscation_result,
+                    assessment,
+                    None,
+                )
                 update_scan_record_status(record.scan_id, assessment.verdict.lower())
-                _render_scan_report(record, scans_file, preflight, assessment, dependency_result, None)
+                _render_scan_report(
+                    record,
+                    scans_file,
+                    preflight,
+                    assessment,
+                    dependency_result,
+                    obfuscation_result,
+                    ai_audit_warning,
+                    ai_audit_result,
+                    None,
+                )
                 raise typer.Exit(code=1)
             update_scan_record_status(record.scan_id, "launching_sandbox")
             sandbox_log_lines: deque[str] = deque(
@@ -84,7 +129,14 @@ def check_command(url: str) -> None:
                 )
             session.ensure_not_timed_out()
             runtime_assessment = assess_runtime_behavior(sandbox_result)
-            assessment = _merge_assessments(dependency_result, runtime_assessment)
+            assessment = _merge_assessments(dependency_result, obfuscation_result, runtime_assessment)
+            ai_audit_result, ai_audit_warning = _attempt_ai_audit(
+                static_checkout_root,
+                dependency_result,
+                obfuscation_result,
+                assessment,
+                sandbox_result,
+            )
             update_scan_record_status(record.scan_id, assessment.verdict.lower())
     except ValidationError as error:
         print_error(f"Validation failed: {error}")
@@ -140,7 +192,20 @@ def check_command(url: str) -> None:
             update_scan_record_status(record.scan_id, "interrupted")
         print_warning("Scan interrupted. Any active sandbox has been cleaned up.")
         raise typer.Exit(code=130) from error
-    _render_scan_report(record, scans_file, preflight, assessment, dependency_result, sandbox_result)
+    finally:
+        if static_checkout_root is not None:
+            cleanup_checkout(static_checkout_root)
+    _render_scan_report(
+        record,
+        scans_file,
+        preflight,
+        assessment,
+        dependency_result,
+        obfuscation_result,
+        ai_audit_warning,
+        ai_audit_result,
+        sandbox_result,
+    )
 
 
 __all__ = ["check_command"]
@@ -160,6 +225,9 @@ def _render_scan_report(
     preflight,
     assessment: ScanAssessment,
     dependency_result: DependencyAnalysisResult | None,
+    obfuscation_result: ObfuscationAnalysisResult,
+    ai_audit_warning: str | None,
+    ai_audit_result: AIAuditResult | None,
     sandbox_result,
 ) -> None:
     table = Table(title="Scan Initialized")
@@ -177,6 +245,10 @@ def _render_scan_report(
     if dependency_result is not None:
         table.add_row("Dependency Manifests", str(len(dependency_result.manifests)))
         table.add_row("Dependencies Parsed", str(len(dependency_result.packages)))
+    table.add_row("Obfuscation Findings", str(len(obfuscation_result.findings)))
+    if ai_audit_result is not None:
+        table.add_row("AI Model", ai_audit_result.model_name)
+        table.add_row("AI Recommendation", ai_audit_result.verdict_recommendation)
     if sandbox_result is not None and sandbox_result.coverage_reason:
         table.add_row("Coverage Detail", sandbox_result.coverage_reason)
     table.add_row("Concurrency", "single active scan enforced")
@@ -226,6 +298,51 @@ def _render_scan_report(
                     border_style="yellow",
                 )
             )
+    console.print(
+        Panel(
+            _render_obfuscation_activity(obfuscation_result),
+            title="Obfuscation Review",
+            border_style="blue",
+        )
+    )
+    if obfuscation_result.findings:
+        console.print(
+            Panel(
+                "\n".join(_format_obfuscation_finding(finding) for finding in obfuscation_result.findings),
+                title="Obfuscation Findings",
+                border_style="yellow",
+            )
+        )
+    if obfuscation_result.warnings:
+        console.print(
+            Panel(
+                "\n".join(obfuscation_result.warnings),
+                title="Obfuscation Warnings",
+                border_style="yellow",
+            )
+        )
+    if ai_audit_result is not None:
+        console.print(
+            Panel(
+                "\n".join(
+                    [
+                        f"Recommendation: {ai_audit_result.verdict_recommendation}",
+                        f"Reasoning: {ai_audit_result.reasoning}",
+                        f"Evidence Summary: {ai_audit_result.evidence_summary}",
+                    ]
+                ),
+                title="AI Audit",
+                border_style="magenta",
+            )
+        )
+    elif ai_audit_warning:
+        console.print(
+            Panel(
+                ai_audit_warning,
+                title="AI Audit",
+                border_style="yellow",
+            )
+        )
     if sandbox_result is not None:
         console.print(
             Panel(
@@ -295,6 +412,19 @@ def _render_dependency_activity(result: DependencyAnalysisResult) -> str:
     return "\n".join(lines)
 
 
+def _render_obfuscation_activity(result: ObfuscationAnalysisResult) -> str:
+    high = sum(1 for finding in result.findings if finding.severity == "HIGH")
+    medium = sum(1 for finding in result.findings if finding.severity == "MEDIUM")
+    low = sum(1 for finding in result.findings if finding.severity == "LOW")
+    return "\n".join(
+        [
+            f"High findings: {high}",
+            f"Medium findings: {medium}",
+            f"Low findings: {low}",
+        ]
+    )
+
+
 def _format_dependency_finding(finding: DependencyFinding) -> str:
     package_detail = f" [{finding.package_name}]" if finding.package_name else ""
     return (
@@ -303,34 +433,76 @@ def _format_dependency_finding(finding: DependencyFinding) -> str:
     )
 
 
-def _build_dependency_only_assessment(result: DependencyAnalysisResult) -> ScanAssessment:
+def _format_obfuscation_finding(finding: ObfuscationFinding) -> str:
+    return (
+        f"{finding.severity} {finding.category} "
+        f"([{finding.file_path}]): {finding.message} "
+        f"Snippet: {finding.snippet}"
+    )
+
+
+def _build_dependency_only_assessment(
+    result: DependencyAnalysisResult,
+    obfuscation_result: ObfuscationAnalysisResult,
+) -> ScanAssessment:
     return ScanAssessment(
         verdict="MALICIOUS",
         summary="Dependency guard found critical static indicators before sandbox execution.",
-        evidence=[_format_dependency_finding(finding) for finding in result.findings],
+        evidence=[
+            *[_format_dependency_finding(finding) for finding in result.findings],
+            *[_format_obfuscation_finding(finding) for finding in obfuscation_result.findings],
+        ],
         coverage="dependency_guard_only",
     )
 
 
 def _merge_assessments(
     dependency_result: DependencyAnalysisResult | None,
+    obfuscation_result: ObfuscationAnalysisResult,
     runtime_assessment: ScanAssessment,
 ) -> ScanAssessment:
-    if dependency_result is None or not dependency_result.findings:
+    static_evidence = [_format_obfuscation_finding(finding) for finding in obfuscation_result.findings]
+    if dependency_result is not None:
+        static_evidence = [
+            *[_format_dependency_finding(finding) for finding in dependency_result.findings],
+            *static_evidence,
+        ]
+    if not static_evidence:
         return runtime_assessment
 
-    static_evidence = [_format_dependency_finding(finding) for finding in dependency_result.findings]
-    if any(finding.severity in {"CRITICAL", "HIGH"} for finding in dependency_result.findings):
+    if runtime_assessment.verdict == "MALICIOUS":
+        return ScanAssessment(
+            verdict="MALICIOUS",
+            summary=runtime_assessment.summary,
+            evidence=static_evidence + runtime_assessment.evidence,
+            coverage=runtime_assessment.coverage,
+        )
+    dependency_findings = dependency_result.findings if dependency_result is not None else []
+    if any(finding.severity in {"CRITICAL", "HIGH"} for finding in dependency_findings):
         return ScanAssessment(
             verdict="MALICIOUS",
             summary="Static dependency analysis found malicious indicators before or alongside runtime analysis.",
             evidence=static_evidence + runtime_assessment.evidence,
             coverage=runtime_assessment.coverage,
         )
-    if runtime_assessment.verdict == "MALICIOUS":
+    if any(finding.severity == "HIGH" for finding in obfuscation_result.findings):
         return ScanAssessment(
-            verdict="MALICIOUS",
+            verdict="SUSPICIOUS",
+            summary="Static obfuscation review found hidden payload patterns that warrant review.",
+            evidence=static_evidence + runtime_assessment.evidence,
+            coverage=runtime_assessment.coverage,
+        )
+    if runtime_assessment.verdict == "SUSPICIOUS":
+        return ScanAssessment(
+            verdict="SUSPICIOUS",
             summary=runtime_assessment.summary,
+            evidence=static_evidence + runtime_assessment.evidence,
+            coverage=runtime_assessment.coverage,
+        )
+    if obfuscation_result.findings:
+        return ScanAssessment(
+            verdict="SUSPICIOUS",
+            summary="Static obfuscation review found encoded or hidden payload indicators that warrant review.",
             evidence=static_evidence + runtime_assessment.evidence,
             coverage=runtime_assessment.coverage,
         )
@@ -340,3 +512,26 @@ def _merge_assessments(
         evidence=static_evidence + runtime_assessment.evidence,
         coverage=runtime_assessment.coverage,
     )
+
+
+def _attempt_ai_audit(
+    static_checkout_root: Path,
+    dependency_result: DependencyAnalysisResult,
+    obfuscation_result: ObfuscationAnalysisResult,
+    runtime_assessment: ScanAssessment,
+    sandbox_result,
+) -> tuple[AIAuditResult | None, str | None]:
+    readme_text = load_readme_context(static_checkout_root)
+    try:
+        return (
+            run_ai_audit(
+                readme_text=readme_text,
+                dependency_result=dependency_result,
+                obfuscation_result=obfuscation_result,
+                runtime_assessment=runtime_assessment,
+                sandbox_result=sandbox_result,
+            ),
+            None,
+        )
+    except AIAuditError as error:
+        return None, f"Optional AI audit was skipped: {error}"

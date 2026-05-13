@@ -70,6 +70,30 @@ class DependencyAnalysisResult:
 
 
 @dataclass(slots=True)
+class ObfuscationFinding:
+    severity: str
+    category: str
+    file_path: str
+    message: str
+    snippet: str
+
+
+@dataclass(slots=True)
+class ObfuscationAnalysisResult:
+    findings: list[ObfuscationFinding]
+    warnings: list[str]
+
+
+@dataclass(slots=True)
+class AIAuditResult:
+    verdict_recommendation: str
+    reasoning: str
+    evidence_summary: str
+    raw_json: dict[str, object]
+    model_name: str
+
+
+@dataclass(slots=True)
 class ScanAssessment:
     verdict: str
     summary: str
