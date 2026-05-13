@@ -14,8 +14,11 @@ app = typer.Typer(
 
 
 @app.command("check")
-def check(url: str) -> None:
-    check_command(url)
+def check(
+    url: str,
+    json_output: bool = typer.Option(False, "--json", help="Print the final scan report as JSON."),
+) -> None:
+    check_command(url, json_output=json_output)
 
 
 @app.command("doctor")

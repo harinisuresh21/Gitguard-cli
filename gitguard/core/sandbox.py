@@ -17,6 +17,7 @@ SANDBOX_CLONE_TIMEOUT_SECONDS = 180
 SANDBOX_MEMORY_LIMIT = "512m"
 SANDBOX_CPU_LIMIT = 1_000_000_000
 SANDBOX_USER = "pwuser"
+SANDBOX_ROOT_USER = "root"
 SANDBOX_WORKDIR = "/workspace"
 SANDBOX_TMP_DIR = "/tmp"
 SANDBOX_TOTAL_TIMEOUT_SECONDS = 360
@@ -42,22 +43,25 @@ def run_sandbox_clone(
 ) -> SandboxResult:
     client = docker.from_env(timeout=5)
     start_time = time.monotonic()
+    host_platform = platform.system().lower()
     try:
         _emit_progress(progress_callback, "Pulling sandbox image...")
         client.images.pull(SANDBOX_IMAGE)
         _emit_progress(progress_callback, "Sandbox image ready.")
         _emit_progress(progress_callback, "Starting sandbox container...")
+        runtime_options = _build_container_runtime_options(host_platform)
         container = client.containers.run(
             SANDBOX_IMAGE,
             command=_build_clone_command(),
             detach=True,
             environment={"TARGET_URL": target_url},
-            user=SANDBOX_USER,
+            user=runtime_options["user"],
             working_dir=SANDBOX_TMP_DIR,
             network_mode="bridge",
             read_only=True,
             tmpfs={SANDBOX_TMP_DIR: ""},
             cap_drop=["ALL"],
+            cap_add=runtime_options["cap_add"],
             mem_limit=SANDBOX_MEMORY_LIMIT,
             nano_cpus=SANDBOX_CPU_LIMIT,
             volumes={},
@@ -71,7 +75,7 @@ def run_sandbox_clone(
         )
         logs = _read_container_logs(container)
         runtime_seconds = time.monotonic() - start_time
-        warnings = _build_isolation_warnings(logs)
+        warnings = _build_isolation_warnings(logs, host_platform)
         if exit_code != 0:
             raise SandboxError("Sandbox clone stage failed inside the container.", logs=logs)
         coverage, coverage_reason, telemetry_events, progress_messages, entrypoint = parse_sandbox_telemetry(logs)
@@ -95,7 +99,7 @@ def run_sandbox_clone(
 
 
 def _build_clone_command() -> list[str]:
-    clone_script = """
+    runner_script = """
 set -eu
 printf 'GITGUARD_PROGRESS: Starting shallow clone\\n'
 cd /tmp
@@ -230,8 +234,39 @@ fi
 printf 'GITGUARD_PROGRESS: Sandbox analysis finished\\n'
 printf 'GITGUARD_SANDBOX_EVENT clone_complete\\n'
 """
-    clone_script = clone_script.replace("__CLONE_TIMEOUT__", str(SANDBOX_CLONE_TIMEOUT_SECONDS))
-    clone_script = clone_script.replace("__DYNAMIC_TIMEOUT__", str(SANDBOX_DYNAMIC_TIMEOUT_SECONDS))
+    runner_script = runner_script.replace("__CLONE_TIMEOUT__", str(SANDBOX_CLONE_TIMEOUT_SECONDS))
+    runner_script = runner_script.replace("__DYNAMIC_TIMEOUT__", str(SANDBOX_DYNAMIC_TIMEOUT_SECONDS))
+    clone_script = f"""
+set -eu
+cat > /tmp/gitguard-runner.sh <<'GITGUARD_RUNNER'
+{runner_script}
+GITGUARD_RUNNER
+chmod 755 /tmp/gitguard-runner.sh
+if [ "${{GITGUARD_ENFORCE_LAN_BLOCK:-0}}" = "1" ]; then
+  printf 'GITGUARD_PROGRESS: Applying private LAN egress policy\\n'
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -A OUTPUT -d 10.0.0.0/8 -j REJECT
+    iptables -A OUTPUT -d 172.16.0.0/12 -j REJECT
+    iptables -A OUTPUT -d 192.168.0.0/16 -j REJECT
+    iptables -A OUTPUT -d 169.254.0.0/16 -j REJECT
+    if command -v ip6tables >/dev/null 2>&1; then
+      ip6tables -A OUTPUT -d fc00::/7 -j REJECT || true
+      ip6tables -A OUTPUT -d fe80::/10 -j REJECT || true
+    fi
+    printf 'GITGUARD_LAN_POLICY enforced\\n'
+  else
+    printf 'GITGUARD_LAN_POLICY unavailable:iptables_missing\\n'
+  fi
+else
+  printf 'GITGUARD_LAN_POLICY degraded:host_platform\\n'
+fi
+if [ "$(id -u)" -eq 0 ]; then
+  printf 'GITGUARD_PROGRESS: Dropping privileges to {SANDBOX_USER}\\n'
+  su {SANDBOX_USER} -s /bin/bash -c /tmp/gitguard-runner.sh
+else
+  /tmp/gitguard-runner.sh
+fi
+"""
     return ["/bin/bash", "-lc", clone_script]
 
 
@@ -276,22 +311,38 @@ def _read_container_logs(container: object) -> str:
     return str(raw_logs)
 
 
-def _build_isolation_warnings(logs: str) -> list[str]:
+def _build_isolation_warnings(logs: str, host_platform: str) -> list[str]:
     warnings: list[str] = []
-    host_platform = platform.system().lower()
-    if host_platform != "linux":
+    if "GITGUARD_LAN_POLICY enforced" in logs:
+        pass
+    elif host_platform != "linux":
         warnings.append(
             "Private LAN egress blocking is not enforced on this host platform; "
             "sandbox is running in degraded isolation mode."
         )
     else:
+        reason = "iptables policy setup did not complete."
+        if "GITGUARD_LAN_POLICY unavailable:iptables_missing" in logs:
+            reason = "iptables is not available inside the sandbox image."
         warnings.append(
-            "Private LAN egress blocking is not enforced yet; sandbox is using Docker bridge "
-            "networking with degraded isolation."
+            "Private LAN egress blocking could not be enforced on this Linux host; "
+            f"{reason} Sandbox is running in degraded isolation mode."
         )
     if "clone_complete" not in logs:
         warnings.append("Sandbox finished without the expected clone completion marker.")
     return warnings
+
+
+def _build_container_runtime_options(host_platform: str) -> dict[str, object]:
+    if host_platform == "linux":
+        return {
+            "user": SANDBOX_ROOT_USER,
+            "cap_add": ["NET_ADMIN"],
+        }
+    return {
+        "user": SANDBOX_USER,
+        "cap_add": [],
+    }
 
 
 def _infer_timeout_phase(logs: str) -> str:

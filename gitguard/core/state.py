@@ -8,6 +8,7 @@ from gitguard.core.models import ScanRecord
 STATE_DIR_NAME = ".gitguard"
 SCANS_FILE_NAME = "scans.json"
 ACTIVE_SCAN_FILE_NAME = "active_scan.json"
+REPORTS_DIR_NAME = "reports"
 
 
 def append_scan_record(record: ScanRecord) -> Path:
@@ -52,6 +53,12 @@ def get_scans_file() -> Path:
     if not scans_file.exists():
         scans_file.write_text("[]\n", encoding="utf-8")
     return scans_file
+
+
+def get_reports_dir() -> Path:
+    reports_dir = get_state_dir() / REPORTS_DIR_NAME
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    return reports_dir
 
 
 def _load_records(scans_file: Path) -> list[dict[str, str]]:

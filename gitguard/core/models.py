@@ -67,6 +67,7 @@ class DependencyAnalysisResult:
     findings: list[DependencyFinding]
     warnings: list[str]
     blocked: bool
+    package_count_by_ecosystem: dict[str, int]
 
 
 @dataclass(slots=True)

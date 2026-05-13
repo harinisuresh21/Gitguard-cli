@@ -57,6 +57,7 @@ class AIAuditTests(unittest.TestCase):
                     findings=[],
                     warnings=[],
                     blocked=False,
+                    package_count_by_ecosystem={"python": 0, "node": 0},
                 ),
                 obfuscation_result=ObfuscationAnalysisResult(findings=[], warnings=[]),
                 runtime_assessment=ScanAssessment(

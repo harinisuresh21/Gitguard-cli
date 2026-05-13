@@ -10,10 +10,13 @@ from gitguard.core.sandbox import (
     SANDBOX_IMAGE,
     SANDBOX_MEMORY_LIMIT,
     SANDBOX_CLONE_TIMEOUT_SECONDS,
+    SANDBOX_ROOT_USER,
     SANDBOX_TOTAL_TIMEOUT_SECONDS,
     SANDBOX_TMP_DIR,
     SANDBOX_USER,
     SandboxTimeoutError,
+    _build_container_runtime_options,
+    _build_isolation_warnings,
     _build_clone_command,
     _infer_timeout_phase,
     run_sandbox_clone,
@@ -56,8 +59,9 @@ class SandboxTests(unittest.TestCase):
             active_file = MagicMock()
             active_file.exists.return_value = False
             mock_active_scan_file.return_value = active_file
-            with ScanSession(record) as session:
-                result = run_sandbox_clone(record.target_url, session)
+            with patch("gitguard.core.sandbox.platform.system", return_value="Windows"):
+                with ScanSession(record) as session:
+                    result = run_sandbox_clone(record.target_url, session)
 
         self.assertEqual(result.image, SANDBOX_IMAGE)
         self.assertEqual(result.progress_messages, [])
@@ -73,6 +77,18 @@ class SandboxTests(unittest.TestCase):
         self.assertEqual(kwargs["mem_limit"], SANDBOX_MEMORY_LIMIT)
         self.assertEqual(kwargs["nano_cpus"], SANDBOX_CPU_LIMIT)
         self.assertEqual(kwargs["volumes"], {})
+
+    def test_linux_runtime_options_enable_net_admin_for_lan_blocking(self) -> None:
+        options = _build_container_runtime_options("linux")
+
+        self.assertEqual(options["user"], SANDBOX_ROOT_USER)
+        self.assertEqual(options["cap_add"], ["NET_ADMIN"])
+
+    def test_non_linux_runtime_options_keep_non_root_user(self) -> None:
+        options = _build_container_runtime_options("windows")
+
+        self.assertEqual(options["user"], SANDBOX_USER)
+        self.assertEqual(options["cap_add"], [])
 
     @patch("gitguard.core.sandbox.time.sleep", return_value=None)
     @patch("gitguard.core.sandbox.time.monotonic", side_effect=[0, 0, 361, 361])
@@ -115,6 +131,25 @@ class SandboxTests(unittest.TestCase):
         script = command[2]
         self.assertIn(f"timeout {SANDBOX_CLONE_TIMEOUT_SECONDS}s git clone --depth 1", script)
         self.assertIn(f"timeout {SANDBOX_DYNAMIC_TIMEOUT_SECONDS}s python - <<'PY'", script)
+        self.assertIn("iptables -A OUTPUT -d 10.0.0.0/8 -j REJECT", script)
+        self.assertIn(f"su {SANDBOX_USER} -s /bin/bash -c /tmp/gitguard-runner.sh", script)
+
+    def test_isolation_warnings_clear_when_lan_policy_enforced(self) -> None:
+        warnings = _build_isolation_warnings(
+            "GITGUARD_LAN_POLICY enforced\nGITGUARD_SANDBOX_EVENT clone_complete\n",
+            "linux",
+        )
+
+        self.assertEqual(warnings, [])
+
+    def test_isolation_warnings_report_linux_degraded_reason(self) -> None:
+        warnings = _build_isolation_warnings(
+            "GITGUARD_LAN_POLICY unavailable:iptables_missing\nGITGUARD_SANDBOX_EVENT clone_complete\n",
+            "linux",
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("iptables is not available", warnings[0])
 
 
 if __name__ == "__main__":

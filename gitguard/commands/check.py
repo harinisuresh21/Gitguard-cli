@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from gitguard.core.models import (
 )
 from gitguard.core.obfuscation_review import analyze_obfuscation
 from gitguard.core.preflight import PreflightError, run_preflight_checks
+from gitguard.core.reporting import build_scan_report, render_scan_report_json, write_scan_report
 from gitguard.core.runtime_analysis import assess_runtime_behavior
 from gitguard.core.sandbox import SandboxError, SandboxTimeoutError, run_sandbox_clone
 from gitguard.core.session import (
@@ -41,7 +43,7 @@ from gitguard.core.validation import ValidationError, validate_repository_url
 from gitguard.ui.console import console, print_error, print_section, print_success, print_warning
 
 
-def check_command(url: str) -> None:
+def check_command(url: str, json_output: bool = False) -> None:
     record: ScanRecord | None = None
     assessment: ScanAssessment | None = None
     dependency_result: DependencyAnalysisResult | None = None
@@ -52,10 +54,12 @@ def check_command(url: str) -> None:
     sandbox_result = None
     scans_file = None
     static_checkout_root: Path | None = None
+    report_path: Path | None = None
     try:
-        console.clear()
-        print_section("GitGuard Check")
-        with console.status("Validating target repository...", spinner="dots"):
+        if not json_output:
+            console.clear()
+            print_section("GitGuard Check")
+        with console.status("Validating target repository...", spinner="dots") if not json_output else nullcontext():
             normalized_url = validate_repository_url(url)
 
         record = ScanRecord.create(
@@ -67,19 +71,19 @@ def check_command(url: str) -> None:
 
         with ScanSession(record) as session:
             session.ensure_not_timed_out()
-            with console.status("Verifying host prerequisites...", spinner="dots"):
+            with console.status("Verifying host prerequisites...", spinner="dots") if not json_output else nullcontext():
                 preflight = run_preflight_checks(require_ai_key=False)
             session.ensure_not_timed_out()
             update_scan_record_status(record.scan_id, "static_checkout")
-            with console.status("Cloning repository for static analysis...", spinner="dots"):
+            with console.status("Cloning repository for static analysis...", spinner="dots") if not json_output else nullcontext():
                 static_checkout_root = clone_repository_to_tempdir(normalized_url)
             session.ensure_not_timed_out()
             update_scan_record_status(record.scan_id, "dependency_guard")
-            with console.status("Running dependency guard...", spinner="dots"):
+            with console.status("Running dependency guard...", spinner="dots") if not json_output else nullcontext():
                 dependency_result = analyze_dependency_manifests(static_checkout_root)
             session.ensure_not_timed_out()
             update_scan_record_status(record.scan_id, "obfuscation_review")
-            with console.status("Running obfuscation review...", spinner="dots"):
+            with console.status("Running obfuscation review...", spinner="dots") if not json_output else nullcontext():
                 obfuscation_result = analyze_obfuscation(static_checkout_root)
             session.ensure_not_timed_out()
             if dependency_result.blocked:
@@ -92,7 +96,8 @@ def check_command(url: str) -> None:
                     None,
                 )
                 update_scan_record_status(record.scan_id, assessment.verdict.lower())
-                _render_scan_report(
+                report_path = _emit_scan_report(
+                    json_output,
                     record,
                     scans_file,
                     preflight,
@@ -117,16 +122,19 @@ def check_command(url: str) -> None:
                 sandbox_log_lines.append(message)
                 live.update(_render_sandbox_progress_panel(sandbox_log_lines), refresh=True)
 
-            with Live(
-                _render_sandbox_progress_panel(sandbox_log_lines),
-                console=console,
-                refresh_per_second=4,
-            ) as live:
-                sandbox_result = run_sandbox_clone(
-                    normalized_url,
-                    session,
-                    progress_callback=on_sandbox_progress,
-                )
+            if json_output:
+                sandbox_result = run_sandbox_clone(normalized_url, session)
+            else:
+                with Live(
+                    _render_sandbox_progress_panel(sandbox_log_lines),
+                    console=console,
+                    refresh_per_second=4,
+                ) as live:
+                    sandbox_result = run_sandbox_clone(
+                        normalized_url,
+                        session,
+                        progress_callback=on_sandbox_progress,
+                    )
             session.ensure_not_timed_out()
             runtime_assessment = assess_runtime_behavior(sandbox_result)
             assessment = _merge_assessments(dependency_result, obfuscation_result, runtime_assessment)
@@ -195,7 +203,8 @@ def check_command(url: str) -> None:
     finally:
         if static_checkout_root is not None:
             cleanup_checkout(static_checkout_root)
-    _render_scan_report(
+    report_path = _emit_scan_report(
+        json_output,
         record,
         scans_file,
         preflight,
@@ -229,6 +238,7 @@ def _render_scan_report(
     ai_audit_warning: str | None,
     ai_audit_result: AIAuditResult | None,
     sandbox_result,
+    report_path: Path | None,
 ) -> None:
     table = Table(title="Scan Initialized")
     table.add_column("Field", style="cyan")
@@ -241,10 +251,18 @@ def _render_scan_report(
     table.add_row("AI", "configured" if preflight.ai_key_present else "not configured")
     table.add_row("State File", str(scans_file))
     table.add_row("Timeout", f"{GLOBAL_SCAN_TIMEOUT_SECONDS} seconds")
+    if report_path is not None:
+        table.add_row("Report File", str(report_path))
     table.add_row("Coverage", assessment.coverage)
     if dependency_result is not None:
         table.add_row("Dependency Manifests", str(len(dependency_result.manifests)))
         table.add_row("Dependencies Parsed", str(len(dependency_result.packages)))
+        table.add_row(
+            "Dependencies by Ecosystem",
+            ", ".join(
+                f"{name}={count}" for name, count in sorted(dependency_result.package_count_by_ecosystem.items())
+            ),
+        )
     table.add_row("Obfuscation Findings", str(len(obfuscation_result.findings)))
     if ai_audit_result is not None:
         table.add_row("AI Model", ai_audit_result.model_name)
@@ -372,6 +390,49 @@ def _render_scan_report(
     print_success("Dependency guard completed before sandbox execution.")
 
 
+def _emit_scan_report(
+    json_output: bool,
+    record: ScanRecord,
+    scans_file,
+    preflight,
+    assessment: ScanAssessment,
+    dependency_result: DependencyAnalysisResult | None,
+    obfuscation_result: ObfuscationAnalysisResult,
+    ai_audit_warning: str | None,
+    ai_audit_result: AIAuditResult | None,
+    sandbox_result,
+) -> Path:
+    report = build_scan_report(
+        record=record,
+        scans_file=scans_file,
+        preflight=preflight,
+        assessment=assessment,
+        dependency_result=dependency_result,
+        obfuscation_result=obfuscation_result,
+        ai_audit_warning=ai_audit_warning,
+        ai_audit_result=ai_audit_result,
+        sandbox_result=sandbox_result,
+    )
+    report_path = write_scan_report(record.scan_id, report)
+    report["report_file"] = str(report_path)
+    if json_output:
+        console.print(render_scan_report_json(report))
+    else:
+        _render_scan_report(
+            record,
+            scans_file,
+            preflight,
+            assessment,
+            dependency_result,
+            obfuscation_result,
+            ai_audit_warning,
+            ai_audit_result,
+            sandbox_result,
+            report_path,
+        )
+    return report_path
+
+
 def _render_observed_activity(sandbox_result) -> str:
     request_count = sum(1 for event in sandbox_result.telemetry_events if event.get("event") == "request")
     websocket_count = sum(1 for event in sandbox_result.telemetry_events if event.get("event") == "websocket")
@@ -402,6 +463,8 @@ def _render_dependency_activity(result: DependencyAnalysisResult) -> str:
     lines = [
         f"Manifest files discovered: {len(result.manifests)}",
         f"Unique dependencies parsed: {len(result.packages)}",
+        f"Python dependencies parsed: {result.package_count_by_ecosystem.get('python', 0)}",
+        f"Node dependencies parsed: {result.package_count_by_ecosystem.get('node', 0)}",
         f"Critical findings: {critical}",
         f"High findings: {high}",
         f"Medium findings: {medium}",

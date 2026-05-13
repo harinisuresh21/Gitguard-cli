@@ -23,8 +23,9 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
     import tomli as tomllib
 
 
-MANIFEST_NAMES = ("requirements.txt", "setup.py", "pyproject.toml", "Pipfile")
+MANIFEST_NAMES = ("requirements.txt", "setup.py", "pyproject.toml", "Pipfile", "package.json")
 TOP_PYPI_CACHE_FILE = "top_pypi_packages.json"
+TOP_NPM_CACHE_FILE = "top_npm_packages.json"
 TOP_PYPI_SEED = (
     "requests",
     "numpy",
@@ -79,6 +80,43 @@ TOP_PYPI_SEED = (
 )
 PACKAGE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+")
 RECENT_PACKAGE_MAX_AGE_DAYS = 7
+TOP_NPM_SEED = (
+    "react",
+    "react-dom",
+    "next",
+    "vue",
+    "angular",
+    "lodash",
+    "axios",
+    "express",
+    "chalk",
+    "commander",
+    "typescript",
+    "vite",
+    "webpack",
+    "esbuild",
+    "rollup",
+    "rxjs",
+    "dotenv",
+    "prettier",
+    "eslint",
+    "tailwindcss",
+    "classnames",
+    "dayjs",
+    "moment",
+    "firebase",
+    "socket.io",
+    "socket.io-client",
+    "three",
+    "zustand",
+    "zod",
+    "playwright",
+)
+NPM_LIFECYCLE_SCRIPT_NAMES = ("preinstall", "install", "postinstall", "prepare")
+SUSPICIOUS_SCRIPT_PATTERN = re.compile(
+    r"(curl|wget|Invoke-WebRequest|powershell|pwsh|bash|sh\s+-c|node\s+-e|python\s+-c|nc\s|ncat\s|certutil)",
+    re.IGNORECASE,
+)
 
 
 class DependencyGuardError(RuntimeError):
@@ -104,11 +142,15 @@ def analyze_dependency_manifests(checkout_root: Path) -> DependencyAnalysisResul
     findings: list[DependencyFinding] = []
     warnings: list[str] = []
     packages: set[str] = set()
+    package_sources: dict[str, str] = {}
+    package_count_by_ecosystem = {"python": 0, "node": 0}
     top_packages = _load_top_pypi_cache()
+    top_npm_packages = _load_top_npm_cache()
 
     for manifest in manifests:
         relative_manifest = manifest.relative_to(checkout_root).as_posix()
         extracted_packages: list[str] = []
+        ecosystem = "python"
         if manifest.name == "requirements.txt":
             extracted_packages = _parse_requirements_manifest(manifest)
         elif manifest.name == "pyproject.toml":
@@ -128,18 +170,37 @@ def analyze_dependency_manifests(checkout_root: Path) -> DependencyAnalysisResul
                 )
                 for message in setup_result.suspicious_calls
             )
+        elif manifest.name == "package.json":
+            ecosystem = "node"
+            package_json_result = _analyze_package_json_manifest(manifest)
+            extracted_packages = package_json_result.packages
+            findings.extend(
+                DependencyFinding(
+                    severity="HIGH",
+                    category="npm_lifecycle_script",
+                    package_name=None,
+                    manifest_path=relative_manifest,
+                    message=message,
+                )
+                for message in package_json_result.suspicious_scripts
+            )
 
         for package_name in extracted_packages:
             normalized_name = _normalize_package_name(package_name)
             if not normalized_name:
                 continue
             packages.add(normalized_name)
-            typo_target = _detect_typosquat(normalized_name, top_packages)
+            package_sources[normalized_name] = ecosystem
+            package_count_by_ecosystem[ecosystem] += 1
+            typo_target = _detect_typosquat(
+                normalized_name,
+                top_npm_packages if ecosystem == "node" else top_packages,
+            )
             if typo_target is not None:
                 findings.append(
                     DependencyFinding(
                         severity="CRITICAL",
-                        category="typosquatting",
+                        category="npm_typosquatting" if ecosystem == "node" else "typosquatting",
                         package_name=normalized_name,
                         manifest_path=relative_manifest,
                         message=f"Package '{normalized_name}' closely matches popular package '{typo_target}'.",
@@ -148,7 +209,11 @@ def analyze_dependency_manifests(checkout_root: Path) -> DependencyAnalysisResul
 
     for package_name in sorted(packages):
         try:
-            metadata = fetch_pypi_package_metadata(package_name)
+            metadata = (
+                fetch_npm_package_metadata(package_name)
+                if package_sources.get(package_name) == "node"
+                else fetch_pypi_package_metadata(package_name)
+            )
         except DependencyGuardError as error:
             warnings.append(str(error))
             continue
@@ -161,23 +226,23 @@ def analyze_dependency_manifests(checkout_root: Path) -> DependencyAnalysisResul
                         severity="MEDIUM",
                         category="recent_publish",
                         package_name=package_name,
-                        manifest_path="PyPI metadata",
+                        manifest_path="registry metadata",
                         message=(
-                            f"Package '{package_name}' was published {age.days} day(s) ago on PyPI."
+                            f"Package '{package_name}' was published {age.days} day(s) ago in the public registry."
                         ),
                     )
                 )
         if metadata.latest_version and _is_disproportionately_low_version(metadata.latest_version):
             findings.append(
                 DependencyFinding(
-                    severity="LOW",
-                    category="low_version_reputation",
-                    package_name=package_name,
-                    manifest_path="PyPI metadata",
-                    message=(
-                        f"Package '{package_name}' has unusually early latest version '{metadata.latest_version}'."
-                    ),
-                )
+                        severity="LOW",
+                        category="low_version_reputation",
+                        package_name=package_name,
+                        manifest_path="registry metadata",
+                        message=(
+                            f"Package '{package_name}' has unusually early latest version '{metadata.latest_version}'."
+                        ),
+                    )
             )
 
     blocked = any(finding.severity in {"CRITICAL", "HIGH"} for finding in findings)
@@ -187,6 +252,7 @@ def analyze_dependency_manifests(checkout_root: Path) -> DependencyAnalysisResul
         findings=findings,
         warnings=warnings,
         blocked=blocked,
+        package_count_by_ecosystem=package_count_by_ecosystem,
     )
 
 
@@ -227,6 +293,34 @@ def fetch_pypi_package_metadata(package_name: str) -> PackageMetadata:
                     release_times.append(parsed)
             if release_times:
                 latest_release_time = min(release_times)
+    return PackageMetadata(latest_version=latest_version, latest_release_time=latest_release_time)
+
+
+def fetch_npm_package_metadata(package_name: str) -> PackageMetadata:
+    request = Request(
+        f"https://registry.npmjs.org/{package_name}",
+        headers={"User-Agent": "GitGuard/0.1"},
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        raise DependencyGuardError(f"npm metadata lookup failed for '{package_name}': HTTP {error.code}.") from error
+    except URLError as error:
+        raise DependencyGuardError(f"npm metadata lookup failed for '{package_name}': {error.reason}.") from error
+
+    latest_version = None
+    latest_release_time = None
+    dist_tags = payload.get("dist-tags")
+    if isinstance(dist_tags, dict):
+        latest = dist_tags.get("latest")
+        if isinstance(latest, str):
+            latest_version = latest
+    times = payload.get("time")
+    if isinstance(times, dict) and latest_version:
+        raw_timestamp = times.get(latest_version)
+        if isinstance(raw_timestamp, str):
+            latest_release_time = _parse_iso8601(raw_timestamp)
     return PackageMetadata(latest_version=latest_version, latest_release_time=latest_release_time)
 
 
@@ -301,6 +395,37 @@ def _parse_pipfile_manifest(path: Path) -> list[str]:
     packages.extend(_extract_names_from_toml_package_map(data.get("packages")))
     packages.extend(_extract_names_from_toml_package_map(data.get("dev-packages")))
     return packages
+
+
+@dataclass(slots=True)
+class PackageJsonAnalysisResult:
+    packages: list[str]
+    suspicious_scripts: list[str]
+
+
+def _analyze_package_json_manifest(path: Path) -> PackageJsonAnalysisResult:
+    payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(payload, dict):
+        return PackageJsonAnalysisResult(packages=[], suspicious_scripts=[])
+    packages: list[str] = []
+    for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            for package_name in value.keys():
+                if isinstance(package_name, str):
+                    packages.append(package_name)
+    suspicious_scripts: list[str] = []
+    scripts = payload.get("scripts")
+    if isinstance(scripts, dict):
+        for script_name in NPM_LIFECYCLE_SCRIPT_NAMES:
+            command = scripts.get(script_name)
+            if not isinstance(command, str):
+                continue
+            if SUSPICIOUS_SCRIPT_PATTERN.search(command):
+                suspicious_scripts.append(
+                    f"Suspicious npm lifecycle script '{script_name}' detected with command: {command}"
+                )
+    return PackageJsonAnalysisResult(packages=packages, suspicious_scripts=suspicious_scripts)
 
 
 def _extract_names_from_toml_group(group: object) -> list[str]:
@@ -445,6 +570,23 @@ def _load_top_pypi_cache() -> set[str]:
 
     cache_path.write_text(json.dumps(sorted(TOP_PYPI_SEED), indent=2), encoding="utf-8")
     return {_normalize_package_name(item) for item in TOP_PYPI_SEED}
+
+
+def _load_top_npm_cache() -> set[str]:
+    cache_path = get_state_dir() / TOP_NPM_CACHE_FILE
+    if cache_path.exists():
+        with suppress(OSError, json.JSONDecodeError):
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(payload, list):
+                normalized = {
+                    _normalize_package_name(item)
+                    for item in payload
+                    if isinstance(item, str) and _normalize_package_name(item)
+                }
+                if normalized:
+                    return normalized
+    cache_path.write_text(json.dumps(sorted(TOP_NPM_SEED), indent=2), encoding="utf-8")
+    return {_normalize_package_name(item) for item in TOP_NPM_SEED}
 
 
 def _detect_typosquat(package_name: str, top_packages: set[str]) -> str | None:
